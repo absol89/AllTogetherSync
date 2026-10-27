@@ -1,0 +1,2 @@
+# Applied with git apply: keep it byte for byte.
+*.patch -text

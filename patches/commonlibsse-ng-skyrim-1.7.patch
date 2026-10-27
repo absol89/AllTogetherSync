@@ -1,0 +1,142 @@
+From 695d10e05b2150bbb214783be3b62bcd776e9b53 Mon Sep 17 00:00:00 2001
+From: absol89 <absol89@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 16:33:04 +0200
+Subject: [PATCH] Support Skyrim 1.7.x and the format 5 address library
+
+Skyrim 1.7.x reported as SE because the runtime was picked from minor
+version 6 only, so plugins looked for version-1-7-x-0.bin. Treat minor
+6 and later as AE. The 1.7.x address library (versionlib-1-7-*.bin) is
+format 5: a fixed header, then one 32-bit offset per ID with 0 meaning
+no address. Read it into the same sorted id/offset table as format 2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/REL/ID.h     | 27 +++++++++++++++++++++++++++
+ include/REL/Module.h | 12 ++++--------
+ src/REL/ID.cpp       | 24 ++++++++++++++++++++++++
+ 3 files changed, 55 insertions(+), 8 deletions(-)
+
+diff --git a/include/REL/ID.h b/include/REL/ID.h
+index 8d7f2be2..a260ece7 100644
+--- a/include/REL/ID.h
++++ b/include/REL/ID.h
+@@ -224,6 +224,8 @@ namespace REL
+ 
+             inline void ignore(std::streamsize a_count) { _stream.ignore(a_count); }
+ 
++            inline void read(void *a_dst, std::streamsize a_count) { _stream.read(static_cast<char *>(a_dst), a_count); }
++
+             template<class T>
+             inline void readin(T &a_val)
+             {
+@@ -253,6 +255,28 @@ namespace REL
+             {
+                 std::int32_t format{};
+                 a_in.readin(format);
++                _format = format;
++
++                // Format 5 (Skyrim 1.7.x): fixed 64-byte module name, 64-bit pointer size, 32-bit count, then one
++                // 32-bit offset per ID with 0 meaning no address. Replaces format 2 for the AE address library.
++                if (format == 5 && a_formatVersion == 2) {
++                    std::int32_t version[4]{};
++                    a_in.readin(version);
++                    a_in.ignore(64);
++
++                    std::uint64_t pointerSize{};
++                    std::uint32_t addressCount{};
++                    a_in.readin(pointerSize);
++                    a_in.readin(addressCount);
++                    _pointerSize = static_cast<std::int32_t>(pointerSize);
++                    _addressCount = static_cast<std::int32_t>(addressCount);
++
++                    for (std::size_t i = 0; i < std::extent_v<decltype(version)>; ++i) {
++                        _version[i] = static_cast<std::uint16_t>(version[i]);
++                    }
++                    return;
++                }
++
+                 if (format != a_formatVersion) {
+                     stl::report_and_fail(
+                             std::format(
+@@ -283,8 +307,11 @@ namespace REL
+ 
+             [[nodiscard]] Version version() const noexcept { return _version; }
+ 
++            [[nodiscard]] std::int32_t format() const noexcept { return _format; }
++
+         private:
+             Version      _version;
++            std::int32_t _format{0};
+             std::int32_t _pointerSize{0};
+             std::int32_t _addressCount{0};
+         };
+diff --git a/include/REL/Module.h b/include/REL/Module.h
+index 54a484c7..9616a76a 100644
+--- a/include/REL/Module.h
++++ b/include/REL/Module.h
+@@ -168,11 +168,9 @@ namespace REL
+ 					case 4:
+ 						_instance._runtime = Runtime::VR;
+ 						break;
+-					case 6:
+-						_instance._runtime = Runtime::AE;
+-						break;
+ 					default:
+-						_instance._runtime = Runtime::SE;
++						// 1.6.x and later (1.7.x) use the AE address library and layouts
++						_instance._runtime = a_version[1] >= 6 ? Runtime::AE : Runtime::SE;
+ 				}
+ 			} else {
+ 				_instance._runtime = a_runtime;
+@@ -339,11 +337,9 @@ namespace REL
+ 					case 4:
+ 						_runtime = Runtime::VR;
+ 						break;
+-					case 6:
+-						_runtime = Runtime::AE;
+-						break;
+ 					default:
+-						_runtime = Runtime::SE;
++						// 1.6.x and later (1.7.x) use the AE address library and layouts
++						_runtime = _version[1] >= 6 ? Runtime::AE : Runtime::SE;
+ 				}
+ 				return true;
+ 			}
+diff --git a/src/REL/ID.cpp b/src/REL/ID.cpp
+index 8d6104a0..e1a62cac 100644
+--- a/src/REL/ID.cpp
++++ b/src/REL/ID.cpp
+@@ -105,6 +105,30 @@ namespace REL
+ 
+ 			auto mapname = L"CommonLibSSEOffsets-v2-"s;
+ 			mapname += a_version.wstring();
++
++			if (header.format() == 5) {
++				// Offsets are indexed by ID, so they come out sorted. Keep only IDs that have an address.
++				std::vector<std::uint32_t> offsets(header.address_count());
++				in.read(offsets.data(), static_cast<std::streamsize>(offsets.size() * sizeof(std::uint32_t)));
++				const auto count = static_cast<std::size_t>(std::count_if(offsets.begin(), offsets.end(), [](std::uint32_t a_offset) { return a_offset != 0; }));
++
++				const auto byteSize = count * sizeof(mapping_t);
++				if (_mmap.open(mapname, byteSize)) {
++					_id2offset = { static_cast<mapping_t*>(_mmap.data()), count };
++				} else if (_mmap.create(mapname, byteSize)) {
++					_id2offset = { static_cast<mapping_t*>(_mmap.data()), count };
++					std::size_t i = 0;
++					for (std::size_t id = 0; id < offsets.size(); ++id) {
++						if (offsets[id] != 0) {
++							_id2offset[i++] = { static_cast<std::uint64_t>(id), static_cast<std::uint64_t>(offsets[id]) };
++						}
++					}
++				} else {
++					return stl::report_and_error("failed to create shared mapping"sv, a_failOnError);
++				}
++				return true;
++			}
++
+ 			const auto byteSize = static_cast<std::size_t>(header.address_count()) * sizeof(mapping_t);
+ 			if (_mmap.open(mapname, byteSize)) {
+ 				_id2offset = { static_cast<mapping_t*>(_mmap.data()), header.address_count() };
+-- 
+2.53.0.windows.1
+
