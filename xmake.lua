@@ -79,6 +79,21 @@ target("RagdollTogether")
     add_cxxflags("cl::/wd4100", "cl::/wd4200", "cl::/wd4201")
 target_end()
 
+-- DJLegends' campfire sync, the first Plugin API example (V1, party messages). It keeps its own version.
+target("STCampfireSync")
+    set_version("0.1.0")
+    add_deps("commonlibsse-ng")
+    add_rules("commonlibsse-ng.plugin", {
+        name = "STCampfireSync",
+        author = "DJLegends",
+        description = "Campfire sync example for the Skyrim Together Plugin API",
+        options = { address_library = true }
+    })
+    add_files("src/STCampfireSync/*.cpp")
+    add_includedirs("include")
+    add_cxxflags("cl::/wd4100", "cl::/wd4200", "cl::/wd4201")
+target_end()
+
 -- Mouths (and voices) of the other players, through Skyrim Together's Plugin API V2/V3. LipSync Together 0.8's own
 -- microphone and voice code is in plugin/; its settings window uses SKSE Menu Framework (GPL-3.0 header in
 -- include/third_party).

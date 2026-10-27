@@ -1,9 +1,9 @@
 TogetherSync third-party notices
 ================================
 
-TogetherSync (RaceMenuTogether, SkyParkourTogether, RagdollTogether and LipSyncTogether) is based on mailamea10's
-Together add-ons and on Skyrim Together Reborn's Plugin API header, both under the GNU General Public License v3; the
-four plugins are released under the same license (LICENSE.txt). The source of each release is published next to it
+RaceMenuTogether, SkyParkourTogether, RagdollTogether and LipSyncTogether are based on mailamea10's Together add-ons,
+and STCampfireSync is DJLegends' plugin. They all include Skyrim Together Reborn's Plugin API header. All are under the
+GNU General Public License v3 (LICENSE.txt). The source of each release is published next to it
 as TogetherSync-<version>-source.zip. The DLLs also contain the following.
 
 SKSE Menu Framework SDK header (LipSyncTogether's settings window)
@@ -11,8 +11,8 @@ SKSE Menu Framework SDK header (LipSyncTogether's settings window)
 
 GNU General Public License v3, the same text as LICENSE.txt.
 
-CommonLibSSE-NG (all four plugins)
-----------------------------------
+CommonLibSSE-NG (every plugin)
+------------------------------
 
 MIT License
 
@@ -36,8 +36,8 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-spdlog 1.13.0 (all four plugins)
---------------------------------
+spdlog 1.13.0 (every plugin)
+----------------------------
 
 The MIT License (MIT)
 
