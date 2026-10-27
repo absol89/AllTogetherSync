@@ -99,18 +99,26 @@ Many mods only offer their features to Papyrus scripts: RaceMenu's `CharGen` and
 auto* pVm = Together::GetVirtualMachine(); // not RE::BSScript::Internal::VirtualMachine::GetSingleton(), see below
 if (!pVm)
     return false;
-auto* pArguments = RE::MakeFunctionArguments(static_cast<RE::Actor*>(pActor), std::int32_t{0}, std::int32_t{id}, std::int32_t{value});
+// Not RE::MakeFunctionArguments, see below.
+auto* pArguments = Together::MakeArguments(static_cast<RE::Actor*>(pActor), std::int32_t{0}, std::int32_t{id}, std::int32_t{value});
 RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback(new MyCallback());
 pVm->DispatchStaticCall("MfgConsoleFunc", "SetPhonemeModifier", pArguments, callback);
 ```
 
 `DispatchStaticCall` returns false if that script or function doesn't exist (the mod isn't installed). The call runs
-later on a script thread; the callback gets its result there. Use `GetVirtualMachine()` from
-[`src/Common/Together.h`](../src/Common/Together.h): CommonLib's own `GetSingleton()` returns the wrong object on Skyrim
-1.7.x (next section).
+later on a script thread; the callback gets its result there.
 
-This is safer than calling a mod's native functions directly through pointers: the script engine checks the call, and
-it works whichever way the mod registered its functions.
+Both helpers are in [`src/Common/Together.h`](../src/Common/Together.h), because CommonLib looks up the script engine at
+the wrong place on Skyrim 1.7.x (next section). `GetVirtualMachine()` finds the right one. `MakeArguments()` replaces
+`RE::MakeFunctionArguments()`, which packs Actors and other forms with CommonLib's own lookup: on 1.7.x a form argument
+then arrives as None (Mfg Fix logs "No actor selected"), or the call crashes inside the script engine.
+
+A Papyrus call is checked by the script engine and works whichever way the mod registered its functions, so it's the
+safe default. For something called very often it's slow: LipSyncTogether moves up to 16 phonemes per face 30 times a
+second, so it calls Mfg Fix's C++ function directly instead, as LipSync Together's original add-on did. It catches the
+function while the script engine binds it, and checks its layout before the first call
+([`src/LipSyncTogether/Host.cpp`](../src/LipSyncTogether/Host.cpp), "Faces"). If the checks fail, it falls back to the
+Papyrus call.
 
 ## Skyrim 1.6 and 1.7 are not the same
 
@@ -126,7 +134,8 @@ Known differences:
 | The player's face tint masks in `PlayerCharacter` | `+0xB18` | `+0xB20` | `+0xB10` |
 
 `Together::GetVirtualMachine()` picks the right offset for the runtime, then checks the game's own type information
-before using what it finds. RaceMenuTogether's `ReadPlayerTints` reads the tints from the right offset per runtime.
+before using what it finds. Everything in CommonLib built on its own lookup is affected too: packing forms into Papyrus
+arguments (use `Together::MakeArguments()`) and SKSE's event registration maps. RaceMenuTogether's `ReadPlayerTints` reads the tints from the right offset per runtime.
 
 Before you read a game object's fields directly, check them against Skyrim Together's own definitions in the fork,
 under `Code/client/Games/Skyrim/`. They run on both runtimes and are checked with `static_assert`s. The only files with

@@ -1,6 +1,6 @@
 set_xmakever("2.8.2")
 set_project("TogetherSync")
-set_version("2.0.1")
+set_version("2.0.2")
 set_languages("c++23")
 set_warnings("allextra")
 set_encodings("utf-8")

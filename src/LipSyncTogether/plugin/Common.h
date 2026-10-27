@@ -19,11 +19,12 @@
 #include "../STRLipSyncAPI.h"
 
 // 2.0.0: LipSync Together 0.8.0 with the Skyrim Together side built into this plugin (Plugin API V3).
-// 2.0.1: Papyrus VM found at its 1.7 offset, so faces move on 1.7.x.
+// 2.0.1: Papyrus VM found at its 1.7 offset.
+// 2.0.2: Mfg Fix's SetPhonemeModifier called directly, as the 0.8 add-on did; Actor arguments fixed on 1.7.x.
 #define LST_VERSION_MAJOR 2
 #define LST_VERSION_MINOR 0
-#define LST_VERSION_PATCH 1
-#define LST_VERSION_STRING "2.0.1"
+#define LST_VERSION_PATCH 2
+#define LST_VERSION_STRING "2.0.2"
 
 namespace LipSync
 {

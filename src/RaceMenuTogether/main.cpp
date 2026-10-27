@@ -93,6 +93,8 @@ constexpr const char* kProtectedMorphKeys[] = {"RSMBodyGen", "OBody", "OBodyNG"}
 STAPI::IVSkyrimTogether2* g_pApi = nullptr;
 STAPI::IVSkyrimTogether3* g_pApi3 = nullptr;
 STAPI::ChannelHandle g_channel = 0;
+// RaceMenu (skee64.dll) is loaded; known from PostPostLoad on. Without it this client neither sends nor applies.
+std::atomic<bool> g_raceMenu{false};
 Skee::IBodyMorphInterface* g_pBodyMorph = nullptr;
 
 struct Tint
@@ -627,7 +629,7 @@ void Export(const char* acpReason)
 
     RemoveFile(PresetPath(kLocalPresetName));
     const std::string cReason = acpReason;
-    const bool cQueued = CallStatic("CharGen", "SaveCharacterPreset", RE::MakeFunctionArguments(static_cast<RE::Actor*>(pPlayer), RE::BSFixedString(kLocalPresetName)),
+    const bool cQueued = CallStatic("CharGen", "SaveCharacterPreset", MakeArguments(static_cast<RE::Actor*>(pPlayer), RE::BSFixedString(kLocalPresetName)),
                                     [cReason, tints = std::move(tints)](const RE::BSScript::Variable&)
                                     {
                                         const auto cPath = PresetPath(kLocalPresetName);
@@ -746,7 +748,7 @@ void EnforceBodyMorphs(std::uint32_t aServerId, RE::Actor* apActor, const std::v
 void EnsureOverlays(std::uint32_t aServerId, RE::Actor* apActor)
 {
     const RE::ActorHandle cHandle = apActor->GetHandle();
-    CallStatic("NiOverride", "HasOverlays", RE::MakeFunctionArguments(static_cast<RE::TESObjectREFR*>(apActor)),
+    CallStatic("NiOverride", "HasOverlays", MakeArguments(static_cast<RE::TESObjectREFR*>(apActor)),
                [aServerId, cHandle](const RE::BSScript::Variable& acResult)
                {
                    if (!acResult.IsBool() || acResult.GetBool())
@@ -758,14 +760,14 @@ void EnsureOverlays(std::uint32_t aServerId, RE::Actor* apActor)
                            if (!pActor)
                                return;
                            // AddOverlays builds the nodes on a task, and the build applies the copy's stored node overrides.
-                           CallStatic("NiOverride", "AddOverlays", RE::MakeFunctionArguments(static_cast<RE::TESObjectREFR*>(pActor.get())),
+                           CallStatic("NiOverride", "AddOverlays", MakeArguments(static_cast<RE::TESObjectREFR*>(pActor.get())),
                                       [cHandle](const RE::BSScript::Variable&)
                                       {
                                           SKSE::GetTaskInterface()->AddTask(
                                               [cHandle]()
                                               {
                                                   if (const auto pActor = cHandle.get())
-                                                      CallStatic("NiOverride", "ApplyNodeOverrides", RE::MakeFunctionArguments(static_cast<RE::TESObjectREFR*>(pActor.get())));
+                                                      CallStatic("NiOverride", "ApplyNodeOverrides", MakeArguments(static_cast<RE::TESObjectREFR*>(pActor.get())));
                                               });
                                       });
                            SKSE::log::info("Overlays were missing on the copy of {:X}, rebuilt them", aServerId);
@@ -874,7 +876,7 @@ void StartLoad(const LoadJob& acJob, RE::Actor* apActor)
     {
         const auto pActor = cHandle.get();
         const bool cQueued = pActor && CallStatic("CharGen", "LoadCharacterPresetEx",
-                                                  RE::MakeFunctionArguments(pActor.get(), RE::BSFixedString(cName.c_str()), static_cast<RE::BGSColorForm*>(pHairColor), std::int32_t{kPresetApplyAll}),
+                                                  MakeArguments(pActor.get(), RE::BSFixedString(cName.c_str()), static_cast<RE::BGSColorForm*>(pHairColor), std::int32_t{kPresetApplyAll}),
                                                   [=](const RE::BSScript::Variable& acResult)
                                                   {
                                                       const bool cLoaded = acResult.IsBool() && acResult.GetBool();
@@ -891,7 +893,7 @@ void StartLoad(const LoadJob& acJob, RE::Actor* apActor)
     // the registration first makes the load queue a fresh build ahead of the overlay overrides.
     if (acJob.HasOverlayNodes)
     {
-        const bool cQueued = CallStatic("NiOverride", "RemoveOverlays", RE::MakeFunctionArguments(static_cast<RE::TESObjectREFR*>(apActor)),
+        const bool cQueued = CallStatic("NiOverride", "RemoveOverlays", MakeArguments(static_cast<RE::TESObjectREFR*>(apActor)),
                                         [load](const RE::BSScript::Variable&) { SKSE::GetTaskInterface()->AddTask(load); });
         if (cQueued)
             return;
@@ -1054,7 +1056,7 @@ void OnPiece(std::uint32_t aServerId, std::string_view aRest)
 
 void OnNearMessage(std::uint32_t, std::uint32_t aServerId, const char* apBytes, size_t aLength)
 {
-    if (!apBytes || aLength < 2 || aLength > STAPI::kMaxNearMessageSize)
+    if (!g_raceMenu.load(std::memory_order_relaxed) || !apBytes || aLength < 2 || aLength > STAPI::kMaxNearMessageSize)
         return;
     std::string_view rest(apBytes, aLength);
     std::string_view kind;
@@ -1195,11 +1197,19 @@ void OnSkseMessage(SKSE::MessagingInterface::Message* apMessage)
     switch (apMessage->type)
     {
     case SKSE::MessagingInterface::kPostPostLoad:
-        // RaceMenu answers from PostLoad on.
+        // Every SKSE plugin is loaded by now. RaceMenu answers from PostLoad on.
+        if (!GetModuleHandleW(L"skee64.dll"))
+        {
+            SKSE::log::warn("RaceMenu (skee64.dll) is not loaded: appearances are neither sent nor applied on this machine");
+            break;
+        }
+        g_raceMenu = true;
         FindBodyMorphInterface();
         break;
     case SKSE::MessagingInterface::kDataLoaded:
     {
+        if (!g_raceMenu)
+            break;
         static MenuSink s_menuSink;
         RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(&s_menuSink);
         Safety::StartFreezeWatchdog(g_pApi);

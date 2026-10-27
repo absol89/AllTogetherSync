@@ -7,8 +7,8 @@
 // receive for a short delay to even out the network, smooth it, and put it on that player's copy; when the speaker goes
 // quiet the copy's mouth eases shut and is left alone again.
 //
-// Faces are moved with Mfg Fix's MfgConsoleFunc.SetPhonemeModifier, called as an ordinary Papyrus call (so whichever
-// way Mfg Fix registered it, it is called correctly). Only phonemes are written, never expressions or modifiers, and
+// Faces are moved with Mfg Fix's MfgConsoleFunc.SetPhonemeModifier, called directly (see "Faces" below), or as a
+// Papyrus call when it can't be. Only phonemes are written, never expressions or modifiers, and
 // only the phonemes this plugin raised are put back to zero. Without Mfg Fix, mouth states are still sent; faces just
 // do not move on that machine.
 //
@@ -174,6 +174,137 @@ void SmoothToward(Shape& aCurrent, const Shape& acTarget, double aDelta) noexcep
 
 // ---- Faces (main thread) ---------------------------------------------------------------------------------------
 
+// Faces move through Mfg Fix's MfgConsoleFunc.SetPhonemeModifier, called directly as LipSync Together 0.8's add-on in
+// the Skyrim Together exe did: a direct call costs next to nothing, where a Papyrus call per phoneme would queue up to
+// 16 calls per face 30 times a second on the script engine. The function is caught as the script engine binds it
+// (BindNativeMethod, slot 0x18 of its vtable on 1.6 and 1.7; Skyrim Together binds its own natives through the same
+// slot), and its C++ function is only called after the checks below. If they fail, the Papyrus call is used instead.
+
+using SetPhonemeModifier_t = bool (*)(RE::StaticFunctionTag*, RE::Actor*, std::int32_t, std::uint32_t, std::int32_t);
+
+std::atomic<RE::BSScript::IFunction*> g_pSetPhonemeNative{nullptr};
+std::uintptr_t g_bindNativeMethod = 0;
+
+bool BindNativeMethodHook(RE::BSScript::IVirtualMachine* apThis, RE::BSScript::IFunction* apFunction)
+{
+    if (apFunction && !g_pSetPhonemeNative.load())
+    {
+        const char* pType = apFunction->GetObjectTypeName().c_str();
+        const char* pName = apFunction->GetName().c_str();
+        if (pType && pName && !_stricmp(pType, "MfgConsoleFunc") && !_stricmp(pName, "SetPhonemeModifier"))
+            g_pSetPhonemeNative.store(apFunction);
+    }
+    return reinterpret_cast<bool (*)(RE::BSScript::IVirtualMachine*, RE::BSScript::IFunction*)>(g_bindNativeMethod)(apThis, apFunction);
+}
+
+bool IsReadable(const void* apAddress, size_t aSize) noexcept
+{
+    MEMORY_BASIC_INFORMATION info{};
+    if (!apAddress || !VirtualQuery(apAddress, &info, sizeof(info)) || info.State != MEM_COMMIT)
+        return false;
+    if (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))
+        return false;
+    const auto cEnd = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
+    return reinterpret_cast<uintptr_t>(apAddress) + aSize <= cEnd;
+}
+
+bool IsExecutable(const void* apAddress) noexcept
+{
+    MEMORY_BASIC_INFORMATION info{};
+    if (!apAddress || !VirtualQuery(apAddress, &info, sizeof(info)) || info.State != MEM_COMMIT)
+        return false;
+    return (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+// The decorated class name MSVC's RTTI gives a vtable, or nullptr when it has none.
+const char* VtableClassName(const void* apVtable) noexcept
+{
+    struct CompleteObjectLocator
+    {
+        uint32_t Signature; // 1 on x64
+        uint32_t Offset;
+        uint32_t ConstructorOffset;
+        int32_t TypeDescriptor; // image-relative
+        int32_t ClassDescriptor;
+        int32_t Self;
+    };
+
+    const auto* pSlot = reinterpret_cast<const uint8_t*>(apVtable) - sizeof(void*);
+    if (!IsReadable(pSlot, sizeof(void*)))
+        return nullptr;
+    const auto* pLocator = *reinterpret_cast<const CompleteObjectLocator* const*>(pSlot);
+    if (!IsReadable(pLocator, sizeof(CompleteObjectLocator)) || pLocator->Signature != 1)
+        return nullptr;
+
+    const auto cImage = reinterpret_cast<uintptr_t>(pLocator) - static_cast<uintptr_t>(pLocator->Self);
+    const auto* pName = reinterpret_cast<const char*>(cImage + pLocator->TypeDescriptor + 2 * sizeof(void*));
+    if (!IsReadable(pName, 8) || pName[0] != '.')
+        return nullptr;
+    return pName;
+}
+
+// Mfg Fix NG (like other CommonLib plugins) registers a native whose callback is a std::function at offset 0x50, where
+// a plain SKSE native keeps its function pointer. MSVC's std::function stores a function pointer in place: the
+// implementation object (vtable, then the pointer) at the start of its 64 bytes, and a pointer to that object in its
+// last 8. Both are checked, with the implementation's RTTI name and signature, before anything is called.
+SetPhonemeModifier_t ResolveSetPhonemeModifier(RE::BSScript::IFunction* apFunction, std::string& aHow) noexcept
+{
+    auto* pObject = reinterpret_cast<uint8_t*>(apFunction);
+    constexpr size_t kCallbackOffset = 0x50;
+    constexpr size_t kFunctionSize = 0x40;
+    if (!IsReadable(pObject + kCallbackOffset, kFunctionSize))
+    {
+        aHow = "its function object cannot be read";
+        return nullptr;
+    }
+
+    void* pFirst = *reinterpret_cast<void**>(pObject + kCallbackOffset);
+    if (IsExecutable(pFirst))
+    {
+        aHow = "plain SKSE native";
+        return reinterpret_cast<SetPhonemeModifier_t>(pFirst);
+    }
+
+    const char* pName = VtableClassName(pFirst);
+    // std::_Func_impl_no_alloc<bool (*)(RE::StaticFunctionTag*, RE::Actor*, int, unsigned int, int), ...>
+    constexpr const char* kSignature = "P6A_NPEAUStaticFunctionTag@RE@@PEAVActor@2@HIH@Z";
+    if (!pName || !std::strstr(pName, "_Func_impl") || !std::strstr(pName, kSignature))
+    {
+        aHow = std::string("its callback is not a function pointer kept in a std::function (") + (pName ? pName : "no RTTI") + ")";
+        return nullptr;
+    }
+
+    void* pImpl = *reinterpret_cast<void**>(pObject + kCallbackOffset + kFunctionSize - sizeof(void*));
+    if (pImpl != pObject + kCallbackOffset)
+    {
+        aHow = "its std::function does not keep the callback in place";
+        return nullptr;
+    }
+
+    void* pCallee = *reinterpret_cast<void**>(pObject + kCallbackOffset + sizeof(void*));
+    if (!IsExecutable(pCallee))
+    {
+        aHow = "the function pointer in its std::function is not code";
+        return nullptr;
+    }
+
+    aHow = "CommonLib native";
+    return reinterpret_cast<SetPhonemeModifier_t>(pCallee);
+}
+
+// Only into the script engine's own vtable, checked by its RTTI name; anything else leaves the Papyrus call in use.
+void InstallNativeWatch()
+{
+    REL::Relocation<std::uintptr_t> vtable{RE::VTABLE_BSScript__Internal__VirtualMachine[0]};
+    const char* pName = VtableClassName(reinterpret_cast<const void*>(vtable.address()));
+    if (!pName || std::strcmp(pName, ".?AVVirtualMachine@Internal@BSScript@@") != 0)
+    {
+        LipSync::Log("The script engine's vtable was not found (%s); faces are moved with Papyrus calls", pName ? pName : "no RTTI");
+        return;
+    }
+    g_bindNativeMethod = vtable.write_vfunc(0x18, &BindNativeMethodHook);
+}
+
 class Callback final : public RE::BSScript::IStackCallbackFunctor
 {
 public:
@@ -182,11 +313,36 @@ public:
 };
 
 bool g_faceUnavailable = false;
+bool g_faceResolved = false;
+SetPhonemeModifier_t g_pSetPhonemeModifier = nullptr;
 
 void SetPhoneme(RE::Actor* apActor, std::uint32_t aId, int aValue)
 {
     if (g_faceUnavailable)
         return;
+
+    if (!g_faceResolved)
+    {
+        g_faceResolved = true;
+        if (auto* pNative = g_pSetPhonemeNative.load())
+        {
+            std::string how;
+            g_pSetPhonemeModifier = ResolveSetPhonemeModifier(pNative, how);
+            if (g_pSetPhonemeModifier)
+                LipSync::Log("Faces are moved by calling MfgConsoleFunc.SetPhonemeModifier directly (%s)", how.c_str());
+            else
+                LipSync::Log("MfgConsoleFunc.SetPhonemeModifier is not called directly (%s); faces are moved with Papyrus calls instead", how.c_str());
+        }
+        else
+            LipSync::Log("MfgConsoleFunc.SetPhonemeModifier was not seen being bound; faces are moved with Papyrus calls if it exists");
+    }
+
+    if (g_pSetPhonemeModifier)
+    {
+        g_pSetPhonemeModifier(nullptr, apActor, kModePhoneme, aId, aValue);
+        return;
+    }
+
     auto* pVm = Together::GetVirtualMachine();
     if (!pVm)
     {
@@ -195,7 +351,7 @@ void SetPhoneme(RE::Actor* apActor, std::uint32_t aId, int aValue)
         return;
     }
     RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback(new Callback());
-    auto* pArguments = RE::MakeFunctionArguments(static_cast<RE::Actor*>(apActor), std::int32_t{kModePhoneme}, std::int32_t(aId), std::int32_t{aValue});
+    auto* pArguments = MakeArguments(static_cast<RE::Actor*>(apActor), std::int32_t{kModePhoneme}, std::int32_t(aId), std::int32_t{aValue});
     if (!pVm->DispatchStaticCall("MfgConsoleFunc", "SetPhonemeModifier", pArguments, callback))
     {
         g_faceUnavailable = true;
@@ -709,6 +865,8 @@ bool Start()
     if (!g_pApi || !g_pDescriptor)
         return false;
     g_pApi3 = FindApi3();
+    // Before the script engine starts and Mfg Fix binds its natives.
+    InstallNativeWatch();
 
     g_channel = g_pApi->RegisterChannel(kChannelName, &OnMessage, nullptr);
     if (!g_channel || !g_pApi->SetNearMessageCallback(g_channel, &OnNearMessage))
